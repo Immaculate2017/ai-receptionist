@@ -160,55 +160,29 @@ def home():
 
 @app.post("/ringcentral/webhook")
 def ringcentral_webhook():
+    # RingCentral may send JSON or raw form text
+    event = request.get_json(silent=True) or {}
+    raw_body = request.data.decode("utf-8") if request.data else ""
 
-    # Handle both JSON and RingCentral form posts
-    if request.is_json:
-        event = request.get_json(silent=True) or {}
-    else:
-       # RingCentral may send JSON OR form-style text
-event = request.get_json(silent=True) or {}
-raw_body = request.data.decode("utf-8") if request.data else ""
+    message = ""
+    from_number = None
 
-message = ""
-from_number = None
+    # Case 1: JSON payload
+    if isinstance(event, dict):
+        message = event.get("message") or event.get("text") or ""
+        from_number = event.get("from") or event.get("fromPhoneNumber")
 
-# Case 1: Proper JSON
-if isinstance(event, dict):
-    message = (
-        event.get("message")
-        or event.get("text")
-        or ""
-    )
+    # Case 2: form-style payload
+    if (not message or not from_number) and raw_body:
+        lines = raw_body.splitlines()
+        for line in lines:
+            lower = line.lower()
+            if lower.startswith("message"):
+                message = line.split(":", 1)[-1].strip()
+            elif lower.startswith("from"):
+                from_number = line.split(":", 1)[-1].strip()
 
-    from_number = (
-        event.get("from")
-        or event.get("fromPhoneNumber")
-    )
-
-# Case 2: Form-style text payload
-if not message and raw_body:
-    # Example format:
-    # message=Estimate\n\nfrom:+18137195670\n\nto:+1XXXXXXXXXX
-    lines = raw_body.splitlines()
-    for line in lines:
-        if line.lower().startswith("message"):
-            message = line.split(":", 1)[-1].strip()
-        if line.lower().startswith("from"):
-            from_number = line.split(":", 1)[-1].strip()
-
-message = message.strip() if message else ""
-
-if not message or not from_number:
-    return jsonify({"ok": True, "ignored": True}), 200
-
-
-    print("---- RINGCENTRAL WEBHOOK ----")
-    print("EVENT:", event)
-    print("FROM:", from_number)
-    print("MESSAGE:", message)
-    print("-----------------------------")
-
-    if not from_number or not message:
+    if not message or not from_number:
         return jsonify({"ok": True, "ignored": True}), 200
 
     session = SESSIONS.get(from_number) or {
@@ -235,15 +209,11 @@ if not message or not from_number:
     for k, v in updated.items():
         if v:
             if k == "notes" and session["fields"].get("notes"):
-                session["fields"]["notes"] = (
-                    session["fields"]["notes"] + " " + v
-                ).strip()
+                session["fields"]["notes"] += " " + v
             else:
                 session["fields"][k] = v
 
-    done = ai.get("is_complete")
-    if done is None:
-        done = is_complete(session["fields"])
+    done = ai.get("is_complete") or is_complete(session["fields"])
 
     if done:
         try:
@@ -251,37 +221,20 @@ if not message or not from_number:
             reply = "Thank you. You are all set. We will reach out shortly."
         except Exception as e:
             reply = "Thank you. I saved your info. We will reach out shortly."
-            session["fields"]["notes"] = (
-                session["fields"].get("notes", "") + f" OrbisX error {e}"
-            ).strip()
+            session["fields"]["notes"] += f" OrbisX error {e}"
 
-        session["history"].append({
-            "from": "assistant",
-            "text": reply,
-            "ts": int(time.time())
-        })
+        rc_send_sms(from_number, reply)
         SESSIONS[from_number] = session
-
-        try:
-            rc_send_sms(from_number, reply)
-        except Exception:
-            pass
-
         return jsonify({"ok": True, "created_lead": True}), 200
 
-    next_q = ai.get("next_question") or \
-        "What vehicle is this for and what service are you looking for?"
+    next_q = ai.get("next_question") or "What vehicle is this for?"
+    rc_send_sms(from_number, next_q)
 
     session["history"].append({
         "from": "assistant",
         "text": next_q,
         "ts": int(time.time())
     })
+
     SESSIONS[from_number] = session
-
-    try:
-        rc_send_sms(from_number, next_q)
-    except Exception:
-        return jsonify({"ok": False, "error": "Failed to send SMS reply"}), 500
-
     return jsonify({"ok": True}), 200
