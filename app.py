@@ -166,7 +166,12 @@ def ringcentral_webhook():
     Exact payload shape can vary by subscription.
     We handle common patterns and fail safely.
     """
+    # Accept BOTH JSON and form-encoded payloads from RingCentral
+if request.is_json:
     event = request.get_json(silent=True) or {}
+else:
+    event = request.form.to_dict()
+
 
     # Try common places where message text and phone appear
     message = (
