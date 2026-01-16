@@ -160,7 +160,6 @@ def home():
 
 @app.post("/ringcentral/webhook")
 def ringcentral_webhook():
-    # RingCentral may send JSON or raw form text
     event = request.get_json(silent=True) or {}
     raw_body = request.data.decode("utf-8") if request.data else ""
 
@@ -174,16 +173,14 @@ def ringcentral_webhook():
 
     # Case 2: form-style payload
     if (not message or not from_number) and raw_body:
-        lines = raw_body.splitlines()
-        for line in lines:
-            lower = line.lower()
-            if lower.startswith("message"):
+        for line in raw_body.splitlines():
+            if line.lower().startswith("message"):
                 message = line.split(":", 1)[-1].strip()
-            elif lower.startswith("from"):
+            if line.lower().startswith("from"):
                 from_number = line.split(":", 1)[-1].strip()
 
     if not message or not from_number:
-        return jsonify({"ok": True, "ignored": True}), 200
+        return jsonify({"ok": True}), 200
 
     session = SESSIONS.get(from_number) or {
         "fields": {
@@ -197,44 +194,24 @@ def ringcentral_webhook():
         "history": []
     }
 
-    session["history"].append({
-        "from": "customer",
-        "text": message,
-        "ts": int(time.time())
-    })
+    session["history"].append({"from": "customer", "text": message})
 
     ai = ai_next_step(session["history"], session["fields"])
 
-    updated = ai.get("updated_fields") or {}
-    for k, v in updated.items():
+    for k, v in (ai.get("updated_fields") or {}).items():
         if v:
-            if k == "notes" and session["fields"].get("notes"):
-                session["fields"]["notes"] += " " + v
-            else:
-                session["fields"][k] = v
+            session["fields"][k] = v
 
-    done = ai.get("is_complete") or is_complete(session["fields"])
-
-    if done:
-        try:
-            orbisx_create_lead(from_number, session["fields"])
-            reply = "Thank you. You are all set. We will reach out shortly."
-        except Exception as e:
-            reply = "Thank you. I saved your info. We will reach out shortly."
-            session["fields"]["notes"] += f" OrbisX error {e}"
-
-        rc_send_sms(from_number, reply)
+    if ai.get("is_complete"):
+        orbisx_create_lead(from_number, session["fields"])
+        rc_send_sms(from_number, "Thank you. We will reach out shortly.")
         SESSIONS[from_number] = session
-        return jsonify({"ok": True, "created_lead": True}), 200
+        return jsonify({"ok": True}), 200
 
     next_q = ai.get("next_question") or "What vehicle is this for?"
     rc_send_sms(from_number, next_q)
 
-    session["history"].append({
-        "from": "assistant",
-        "text": next_q,
-        "ts": int(time.time())
-    })
-
+    session["history"].append({"from": "assistant", "text": next_q})
     SESSIONS[from_number] = session
+
     return jsonify({"ok": True}), 200
