@@ -161,31 +161,26 @@ def home():
 @app.post("/ringcentral/webhook")
 def ringcentral_webhook():
     """
-    Receives RingCentral event notifications.
-    We are interested in inbound SMS messages.
-    Exact payload shape can vary by subscription.
-    We handle common patterns and fail safely.
+    Receives RingCentral inbound SMS
     """
-    # Accept BOTH JSON and form-encoded payloads from RingCentral
-if request.is_json:
-    event = request.get_json(silent=True) or {}
-else:
-    event = request.form.to_dict()
 
+    # Accept BOTH JSON and form-encoded payloads
+    if request.is_json:
+        event = request.get_json(silent=True) or {}
+    else:
+        event = request.form.to_dict()
 
-    # Try common places where message text and phone appear
     message = (
         event.get("body", {}).get("text")
         or event.get("text")
-        or event.get("message", {}).get("text")
+        or event.get("Message text")
         or ""
     ).strip()
 
     from_number = (
         event.get("body", {}).get("from", {}).get("phoneNumber")
-        or event.get("from", {}).get("phoneNumber") if isinstance(event.get("from"), dict) else None
+        or event.get("Sender's phone number")
         or event.get("fromPhoneNumber")
-        or event.get("body", {}).get("fromPhoneNumber")
     )
 
     if not from_number or not message:
@@ -203,47 +198,36 @@ else:
         "history": []
     }
 
-    session["history"].append({"from": "customer", "text": message, "ts": int(time.time())})
+    session["history"].append({
+        "from": "customer",
+        "text": message,
+        "ts": int(time.time())
+    })
 
     ai = ai_next_step(session["history"], session["fields"])
 
     updated = ai.get("updated_fields") or {}
     for k, v in updated.items():
         if v:
-            if k == "notes" and session["fields"].get("notes"):
-                session["fields"]["notes"] = (session["fields"]["notes"] + " " + v).strip()
-            else:
-                session["fields"][k] = v
+            session["fields"][k] = v
 
-    done = ai.get("is_complete")
-    if done is None:
-        done = is_complete(session["fields"])
+    done = ai.get("is_complete", False)
 
     if done:
         try:
             orbisx_create_lead(from_number, session["fields"])
             reply = "Thank you. You are all set. We will reach out shortly."
         except Exception as e:
-            reply = "Thank you. I saved your info. We will reach out shortly."
-            session["fields"]["notes"] = (session["fields"].get("notes", "") + f" OrbisX error {e}").strip()
+            reply = "Thank you. We received your info and will reach out shortly."
+            session["fields"]["notes"] += f" OrbisX error: {e}"
 
-        session["history"].append({"from": "assistant", "text": reply, "ts": int(time.time())})
+        rc_send_sms(from_number, reply)
         SESSIONS[from_number] = session
+        return jsonify({"ok": True, "created": True}), 200
 
-        try:
-            rc_send_sms(from_number, reply)
-        except Exception:
-            pass
-
-        return jsonify({"ok": True, "created_lead": True}), 200
-
-    next_q = ai.get("next_question") or "What vehicle is this for and what service are you looking for"
-    session["history"].append({"from": "assistant", "text": next_q, "ts": int(time.time())})
+    next_q = ai.get("next_question", "What vehicle is this for?")
+    rc_send_sms(from_number, next_q)
+    session["history"].append({"from": "assistant", "text": next_q})
     SESSIONS[from_number] = session
-
-    try:
-        rc_send_sms(from_number, next_q)
-    except Exception:
-        return jsonify({"ok": False, "error": "Failed to send SMS reply"}), 500
 
     return jsonify({"ok": True}), 200
