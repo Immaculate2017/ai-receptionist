@@ -160,28 +160,31 @@ def home():
 
 @app.post("/ringcentral/webhook")
 def ringcentral_webhook():
-    """
-    Receives RingCentral inbound SMS
-    """
 
-    # Accept BOTH JSON and form-encoded payloads
+    # Handle both JSON and RingCentral form posts
     if request.is_json:
         event = request.get_json(silent=True) or {}
     else:
-        event = request.form.to_dict()
+        event = request.form.to_dict() or {}
 
     message = (
-        event.get("body", {}).get("text")
+        event.get("Message")
         or event.get("text")
-        or event.get("Message text")
+        or event.get("Body")
         or ""
     ).strip()
 
     from_number = (
-        event.get("body", {}).get("from", {}).get("phoneNumber")
-        or event.get("Sender's phone number")
+        event.get("From")
+        or event.get("from")
         or event.get("fromPhoneNumber")
     )
+
+    print("---- RINGCENTRAL WEBHOOK ----")
+    print("EVENT:", event)
+    print("FROM:", from_number)
+    print("MESSAGE:", message)
+    print("-----------------------------")
 
     if not from_number or not message:
         return jsonify({"ok": True, "ignored": True}), 200
@@ -209,25 +212,54 @@ def ringcentral_webhook():
     updated = ai.get("updated_fields") or {}
     for k, v in updated.items():
         if v:
-            session["fields"][k] = v
+            if k == "notes" and session["fields"].get("notes"):
+                session["fields"]["notes"] = (
+                    session["fields"]["notes"] + " " + v
+                ).strip()
+            else:
+                session["fields"][k] = v
 
-    done = ai.get("is_complete", False)
+    done = ai.get("is_complete")
+    if done is None:
+        done = is_complete(session["fields"])
 
     if done:
         try:
             orbisx_create_lead(from_number, session["fields"])
             reply = "Thank you. You are all set. We will reach out shortly."
         except Exception as e:
-            reply = "Thank you. We received your info and will reach out shortly."
-            session["fields"]["notes"] += f" OrbisX error: {e}"
+            reply = "Thank you. I saved your info. We will reach out shortly."
+            session["fields"]["notes"] = (
+                session["fields"].get("notes", "") + f" OrbisX error {e}"
+            ).strip()
 
-        rc_send_sms(from_number, reply)
+        session["history"].append({
+            "from": "assistant",
+            "text": reply,
+            "ts": int(time.time())
+        })
         SESSIONS[from_number] = session
-        return jsonify({"ok": True, "created": True}), 200
 
-    next_q = ai.get("next_question", "What vehicle is this for?")
-    rc_send_sms(from_number, next_q)
-    session["history"].append({"from": "assistant", "text": next_q})
+        try:
+            rc_send_sms(from_number, reply)
+        except Exception:
+            pass
+
+        return jsonify({"ok": True, "created_lead": True}), 200
+
+    next_q = ai.get("next_question") or \
+        "What vehicle is this for and what service are you looking for?"
+
+    session["history"].append({
+        "from": "assistant",
+        "text": next_q,
+        "ts": int(time.time())
+    })
     SESSIONS[from_number] = session
+
+    try:
+        rc_send_sms(from_number, next_q)
+    except Exception:
+        return jsonify({"ok": False, "error": "Failed to send SMS reply"}), 500
 
     return jsonify({"ok": True}), 200
