@@ -193,20 +193,27 @@ def ringcentral_webhook():
         },
         "history": []
     }
+session["history"].append({"role": "user", "content": message})
 
-    session["history"].append({"from": "customer", "text": message})
+from openai import OpenAI
+import os
 
-    ai = ai_next_step(session["history"], session["fields"])
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    for k, v in (ai.get("updated_fields") or {}).items():
-        if v:
-            session["fields"][k] = v
+completion = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "system", "content": "You are an AI receptionist for Immaculate Auto Care. Be short, professional, and helpful."},
+        *session["history"]
+    ]
+)
 
-    if ai.get("is_complete"):
-        orbisx_create_lead(from_number, session["fields"])
-        rc_send_sms(from_number, "Thank you. We will reach out shortly.")
-        SESSIONS[from_number] = session
-        return jsonify({"ok": True}), 200
+ai_reply = completion.choices[0].message.content
+
+session["history"].append({"role": "assistant", "content": ai_reply})
+
+send_sms(from_number, ai_reply)
+
 
     next_q = ai.get("next_question") or "What vehicle is this for?"
     rc_send_sms(from_number, next_q)
