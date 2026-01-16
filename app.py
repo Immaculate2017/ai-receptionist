@@ -165,20 +165,42 @@ def ringcentral_webhook():
     if request.is_json:
         event = request.get_json(silent=True) or {}
     else:
-        event = request.form.to_dict() or {}
+       # RingCentral may send JSON OR form-style text
+event = request.get_json(silent=True) or {}
+raw_body = request.data.decode("utf-8") if request.data else ""
 
+message = ""
+from_number = None
+
+# Case 1: Proper JSON
+if isinstance(event, dict):
     message = (
-        event.get("Message")
+        event.get("message")
         or event.get("text")
-        or event.get("Body")
         or ""
-    ).strip()
+    )
 
     from_number = (
-        event.get("From")
-        or event.get("from")
+        event.get("from")
         or event.get("fromPhoneNumber")
     )
+
+# Case 2: Form-style text payload
+if not message and raw_body:
+    # Example format:
+    # message=Estimate\n\nfrom:+18137195670\n\nto:+1XXXXXXXXXX
+    lines = raw_body.splitlines()
+    for line in lines:
+        if line.lower().startswith("message"):
+            message = line.split(":", 1)[-1].strip()
+        if line.lower().startswith("from"):
+            from_number = line.split(":", 1)[-1].strip()
+
+message = message.strip() if message else ""
+
+if not message or not from_number:
+    return jsonify({"ok": True, "ignored": True}), 200
+
 
     print("---- RINGCENTRAL WEBHOOK ----")
     print("EVENT:", event)
